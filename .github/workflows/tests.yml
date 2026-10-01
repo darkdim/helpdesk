@@ -11,8 +11,8 @@ concurrency:
 
 jobs:
   laravel:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
 
     strategy:
       fail-fast: false
@@ -35,7 +35,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
 
       - name: Get Composer cache directory
@@ -58,15 +58,16 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-#      - name: Type check
-#        run: npx tsc --noEmit
-#        continue-on-error: false
-
+      # Сборка идёт до проверки типов и тестов: Wayfinder генерирует
+      # resources/js/routes и actions, а Inertia-тестам нужен public/build/manifest.json
       - name: Build frontend
         run: npm run build
 
+      - name: Type check
+        run: npm run types:check
+
       - name: Run Laravel tests
-        run: php artisan test --compact
+        run: php artisan test
         env:
           DB_CONNECTION: sqlite
           DB_DATABASE: ':memory:'
@@ -74,7 +75,3 @@ jobs:
           SESSION_DRIVER: array
           QUEUE_CONNECTION: sync
           MAIL_MAILER: array
-
-      # Раскомментируйте, когда в package.json появится скрипт "test" (Vitest)
-      # - name: Run frontend tests
-      #   run: npm test -- --run
