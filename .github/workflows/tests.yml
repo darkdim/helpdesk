@@ -58,8 +58,8 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      # Сборка идёт до проверки типов и тестов: Wayfinder генерирует
-      # resources/js/routes и actions, а Inertia-тестам нужен public/build/manifest.json
+      # Build runs before type check and tests: Wayfinder generates
+      # resources/js/routes and actions, Inertia tests need public/build/manifest.json
       - name: Build frontend
         run: npm run build
 
