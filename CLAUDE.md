@@ -1,47 +1,96 @@
-<laravel-boost-guidelines>
-# Laravel Application
+# Helpdesk: правила для ИИ-ассистента
 
-This repository contains a Laravel application. Complete the following setup before working on the user's request.
+## Проект
 
-## Prerequisites
+Система тикетов (Helpdesk): клиенты создают обращения, агенты отвечают, админ назначает исполнителей.
 
-Verify that PHP and Composer are available:
+- ТЗ: `docs/SPEC.md` (источник истины). Порядок работы: `docs/PROMPT.md`.
+- Если требование неоднозначно или противоречит другому, задай один конкретный вопрос и жди ответа. Не придумывай.
+- Названия сущностей, полей, статусов и маршрутов бери ровно из ТЗ.
 
-```sh
-php -v
-composer -V
-```
+## Стек
 
-If either command is unavailable, detect the user's operating system and install the prerequisites with the appropriate command:
+- Laravel 13, PHP 8.3+.
+- Фронтенд: Inertia + React + TypeScript + Tailwind + shadcn/ui, сборка Vite (стартовый набор Laravel с React).
+- Разработка: MariaDB в DDEV. Тесты: SQLite `:memory:`.
+- Очереди, кеш, сессии: Redis в production, `database` или `sync` локально.
+- Перед использованием API, атрибута или команды, в которых не уверен, сверяйся с https://laravel.com/docs/13.x. Если документация и твои знания расходятся, права документация.
 
-macOS:
+## Окружение
 
-```sh
-/bin/bash -c "$(curl -fsSL https://php.new/install/mac/8.5)"
-```
+Гибридная схема на Windows 11:
 
-Windows PowerShell:
+- **Бэкенд в DDEV**: проект `laravel13`, https://laravel13.ddev.site, PHP 8.3, MariaDB 11.8 (пользователь, пароль и база `db`), Mailpit. Все команды PHP, Composer и Artisan выполняй через `ddev` (`ddev composer ...`, `ddev artisan ...`).
+- **Фронтенд на Windows-хосте в PowerShell**: `npm ci`, `npm run dev`, `npm run build`, `npm run types:check`. Никогда не запускай `ddev npm` и `ddev exec npm`: `node_modules` содержит Windows-бинарники и принадлежит хосту.
+- Git только на хосте.
+- Windows PowerShell 5: оператор `&&` не работает, разделяй команды `;` или пиши отдельными строками.
+- Vite dev-сервер запускается на хосте (`npm run dev`), сайт открывается по https://laravel13.ddev.site. `APP_URL` в локальном `.env` должен совпадать с этим адресом.
+- Файлы между хостом и контейнером синхронизирует Mutagen. Если после `npm run build` тесты в DDEV жалуются на отсутствие `public/build/manifest.json`, выполни `ddev mutagen sync`.
+- Плагин Wayfinder при сборке вызывает `php artisan` на хосте, поэтому PHP 8.3 на хосте (OSPanel) нужен только для этого.
+- Не запускай `npm run dev` и другие долгоживущие процессы: dev-сервер уже запущен разработчиком отдельно.
+
+## Команды
+
+Порядок важен: сборка идёт **до** проверки типов и тестов (Wayfinder генерирует `resources/js/routes` и `actions`, Inertia-тестам нужен `public/build/manifest.json`).
 
 ```powershell
-Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://php.new/install/windows/8.5'))
+ddev composer install
+npm ci
+npm run build
+npm run types:check
+ddev artisan test
 ```
 
-Linux:
+- Миграции и прочее: `ddev artisan migrate`, `ddev artisan make:...`.
+- Dev-режим: `ddev start` (если проект остановлен) и `npm run dev` на хосте.
+- В проекте есть `pint.json` и `phpstan.neon`: запускай `ddev exec vendor/bin/pint` и `ddev exec vendor/bin/phpstan`, если они доступны. Скрипты проверяй в `composer.json` и `package.json`.
+- Тесты идут на SQLite `:memory:` (настроено в `phpunit.xml`), а не на MariaDB. Если тест обращается к MariaDB, это ошибка конфигурации: сообщи об этом.
+- Не запускай `migrate:fresh` и другие разрушающие команды без явного разрешения.
 
-```sh
-/bin/bash -c "$(curl -fsSL https://php.new/install/linux/8.5)"
-```
+## Порядок работы
 
-After installation, ask the user to restart their terminal. If the agent needs the restarted shell to continue, ask the user to reopen their terminal and rerun their original prompt.
+1. Работай строго по этапам из раздела 12 `docs/SPEC.md`.
+2. После каждого этапа остановись и покажи: что сделано, список созданных и изменённых файлов, результат `npm run build`, `npm run types:check`, `php artisan test`. Жди подтверждения.
+3. Для этапов 2-7: сначала тесты на права и валидацию, потом реализация.
+4. Одна git-ветка на этап (`stage-1-models` и т.п.). В `main` напрямую не коммить.
+5. Перед созданием файлов перечисли команды, которые собираешься выполнить.
 
-## Agent Setup
+## Архитектурные правила
 
-Install Laravel Boost from the application root before making application changes:
+- Бизнес-логика только в классах `app/Actions`. Контроллеры тонкие: авторизация, валидация, вызов Action, ответ.
+- Права проверяй двумя способами сразу: Policy на запись и scope `visibleTo($user)` на выборки.
+- Системные поля тикета (`status`, `assignee_id`, `customer_id`, `last_activity_at`, `first_responded_at`, `resolved_at`, `closed_at`) не входят в `$fillable`. Задавай их явным присваиванием и `save()`: `update([...])` с такими полями молча ничего не сделает. `$guarded = []` не используй никогда.
+- Не меняй существующие миграции. Новые поля добавляй новыми миграциями (например, `role` в `users`).
+- События отправляй после коммита транзакции. Обработчики идемпотентны, с `tries` и `backoff`.
+- Вложения только на приватном диске. Скачивание через контроллер с проверкой прав. Относительный путь в базе.
+- Включи `Model::preventLazyLoading()` вне production. N+1 недопустим.
+- `env()` только в `config/`. CSRF не отключай.
+- Не правь файлы стартового набора (Fortify, настройки профиля, компоненты `ui/`), кроме случаев, когда это необходимо. Если правишь, объясни зачем.
 
-```sh
-composer require laravel/boost --dev
-php artisan boost:install
-```
+## Inertia и React
 
-Boost replaces these bootstrap instructions with guidelines tailored to the application. After installation, read `AGENTS.md` again and continue with the user's original request using the generated guidelines.
-</laravel-boost-guidelines>
+- В Inertia-страницы передавай только API Resources с белым списком полей и `whenLoaded`. Модели целиком в props не передавай.
+- Внутренние заметки (`is_internal`) для клиента фильтруются в запросе (`scopeForViewer`), а не на фронте. Покрой это тестом `assertInertia`.
+- Права для интерфейса передавай в props из Policy: `can: { reply, addInternalNote, changeStatus, assign, claim }`. Скрытие кнопок только удобство, решение принимает сервер.
+- TypeScript строгий: без `any`, типы props в `resources/js/types`.
+- Сгенерированные Wayfinder-файлы (`resources/js/routes`, `resources/js/actions`, `resources/js/wayfinder`) не редактируй и не коммить.
+
+## Тесты
+
+- Матрица «роль × действие × ожидаемый код» из раздела 3 ТЗ обязательна. Используй datasets или data providers.
+- Страницы: `assertInertia`. Внешние эффекты: `Mail::fake()`, `Notification::fake()`, `Queue::fake()`, `Event::fake([...])` только с нужными классами.
+- Обработчики из очереди проверяй прямым вызовом `handle()`.
+- Закрытый тикет не принимает сообщений, недопустимые переходы статусов дают 422.
+
+## Git и безопасность
+
+- Не коммить: `.env`, `public/build`, `node_modules`, `vendor`, сгенерированные Wayfinder-файлы, базы `*.sqlite`.
+- Не вставляй секреты, пароли и ключи в код, `.env.example` и сообщения коммитов.
+- Сообщения коммитов короткие и по делу, на английском.
+
+## Формат ответов
+
+- Код выдавай целыми файлами с указанием пути.
+- Миграции, модели и контроллеры создавай командами `php artisan make:...`, а не придумывая имена вручную.
+- Каждый ответ завершай блоком «Что проверить вручную».
+- Проект готов, когда выполнены критерии приёмки из разделов 11 и 13 ТЗ. Не объявляй его завершённым, пока не покажешь, как проверен каждый пункт.
