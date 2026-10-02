@@ -14,10 +14,10 @@
 |---|---|
 | Фреймворк | Laravel 13, PHP 8.3+ |
 | Интерфейс | Inertia + React + TypeScript + Tailwind, компоненты shadcn/ui, сборка Vite (раздел 13) |
-| База данных | MySQL 8 / MariaDB (в тестах SQLite in-memory) |
+| База данных | MariaDB 11.8 в DDEV (production: MySQL 8 / MariaDB); в тестах SQLite in-memory |
 | Очереди, кеш, сессии | Redis (локально допустим `database`) |
 | Почта | Mailpit локально, SMTP на сервере |
-| Тесты | Pest или PHPUnit (`php artisan test`), Vitest + Testing Library, Playwright |
+| Тесты | PHPUnit (`php artisan test`), Vitest + Testing Library, Playwright |
 | Деплой | PHP-FPM + nginx, Supervisor, cron |
 
 ## 3. Роли и права
@@ -26,7 +26,7 @@
 |---|---|---|---|
 | Создать тикет | да | да | да |
 | Видеть тикеты | только свои | назначенные ему и неназначенные | все |
-| Отвечать в тикете | в своём, пока не закрыт | в доступном, пока не закрыт | да |
+| Отвечать в тикете | в своём, пока не закрыт | в доступном, пока не закрыт | да, пока не закрыт |
 | Внутренняя заметка | нет | да | да |
 | Видеть внутренние заметки | нет | да | да |
 | Менять статус | нет | в назначенных ему | да |
@@ -37,9 +37,13 @@
 
 Policy содержит отдельные способности: `view`, `reply`, `addInternalNote`, `changeStatus`, `claim` (агент, только для тикета без исполнителя), `assign` (только админ через `before()`). Маршрут `POST tickets/{ticket}/claim` обслуживает `TicketClaimController`.
 
-Правило безопасности: клиент не должен узнавать о существовании чужих тикетов. Для чужого тикета допустим ответ 403 или 404, но решение должно быть единым во всём приложении.
+### Коды ответа при отказе (единые во всём приложении)
 
-Клиент, открывающий чужой тикет, получает 404 (чтобы не раскрывать существование тикета). Запрещённое действие внутри доступного тикета возвращает 403. Агент, открывающий тикет другого агента, получает 403.
+- Клиент открывает чужой тикет или пытается в нём ответить: **404** (чтобы не раскрывать существование тикета). Реализуется в Policy через `Response::denyAsNotFound()`, а не в контроллерах.
+- Агент открывает тикет, назначенный другому агенту: **403**.
+- Запрещённое действие внутри доступного тикета (ответ в закрытый, смена статуса клиентом и т.п.): **403**.
+- Администратор тоже не может ответить в закрытый тикет: `before()` не применяется к способности `reply`.
+- Гость: редирект на страницу входа.
 
 ## 4. Модель данных и связи
 
@@ -59,33 +63,33 @@ users ─────────────└──< notifications           
 
 ### Сущности
 
-**users** (расширение стандартной): `role` (`customer` | `agent` | `admin`, по умолчанию `customer`), индекс по `role`.
+**users** (расширение стандартной): `role` (`string(20)`, значения `customer` | `agent` | `admin`, по умолчанию `customer`, каст в `UserRole`), индекс по `role`. Поле `role` не входит в fillable и задаётся только явным присваиванием.
 
 **tickets**
 
 | Поле | Тип | Правило |
 |---|---|---|
 | `id` | bigint PK | |
-| `number` | string(20), unique | формат `HD-000123`, генерируется после создания по `id` |
+| `number` | string(20), nullable, unique | формат `HD-000123`; до заполнения NULL; заполняет `CreateTicket` по `id` в той же транзакции |
 | `customer_id` | FK users | обязательное, каскадное удаление |
 | `assignee_id` | FK users, NULL | при удалении агента сбрасывается в NULL |
 | `subject` | string(200) | |
-| `status` | enum | `open`, `pending`, `resolved`, `closed` |
-| `priority` | enum | `low`, `normal`, `high`, `urgent` |
+| `status` | string(20), по умолчанию `open` | каст в `TicketStatus`: `open`, `pending`, `resolved`, `closed` |
+| `priority` | string(20), по умолчанию `normal` | каст в `TicketPriority`: `low`, `normal`, `high`, `urgent` |
 | `first_responded_at` | timestamp NULL | время первого ответа агента, ставится один раз |
-| `last_activity_at` | timestamp | время последнего сообщения |
+| `last_activity_at` | timestamp, по умолчанию текущее время | время последнего сообщения |
 | `resolved_at`, `closed_at` | timestamp NULL | |
 | `created_at`, `updated_at`, `deleted_at` | | мягкое удаление |
 
 Индексы: `(status, priority)`, `(assignee_id, status)`, `(customer_id, created_at)`, `last_activity_at`.
 
-**ticket_messages**: `ticket_id`, `user_id`, `body` (text), `is_internal` (bool, по умолчанию false), временные метки. Индекс `(ticket_id, created_at)`.
+**ticket_messages**: `ticket_id`, `user_id`, `body` (text), `is_internal` (bool, по умолчанию false), временные метки. Индекс `(ticket_id, created_at)`. В fillable только `body`; `is_internal` и `user_id` задаются явно Action'ом.
 
 **ticket_attachments**: `ticket_message_id`, `path` (относительный путь на приватном диске), `original_name`, `mime`, `size`.
 
 **tags**: `name` (unique), `color`. Связь с тикетами через `tag_ticket` (составной первичный ключ).
 
-**ticket_status_logs**: `ticket_id`, `user_id` (кто сменил, NULL для системы), `from_status`, `to_status`, `created_at`.
+**ticket_status_logs**: `ticket_id`, `user_id` (кто сменил, NULL для системы), `from_status`, `to_status`, `created_at` (без `updated_at`).
 
 ## 5. Жизненный цикл тикета
 
@@ -108,7 +112,9 @@ users ─────────────└──< notifications           
 1. Ответ клиента в тикете `pending` переводит его в `open`.
 2. Тикет в `pending`, неактивный 7 дней, закрывается планировщиком (срок настраивается параметром).
 3. Первый ответ агента фиксирует `first_responded_at`; повторные ответы его не меняют.
-4. Закрытый тикет не принимает новых сообщений.
+4. Закрытый тикет не принимает новых сообщений (для всех ролей, включая админа).
+
+Все изменения состояния тикета выполняют Actions (`ReplyToTicket`, `ChangeTicketStatus`, команда автозакрытия) внутри транзакции, а не слушатели событий. Каждый переход статуса пишет запись в `ticket_status_logs`: при автоматическом переходе `pending → open` в `user_id` автор ответа, при закрытии планировщиком `user_id` равен NULL.
 
 ## 6. Функциональные требования
 
@@ -130,13 +136,15 @@ users ─────────────└──< notifications           
 
 ## 7. События и уведомления
 
+События и слушатели только отправляют уведомления. Состояние тикета они не меняют (см. раздел 5).
+
 | Событие | Обработчики (в очереди) |
 |---|---|
 | `TicketCreated` | уведомить агентов; письмо-подтверждение клиенту |
 | `TicketAssigned` | уведомить назначенного агента |
-| `AgentReplied` | уведомить клиента; зафиксировать `first_responded_at` |
-| `CustomerReplied` | уведомить агента; вернуть `pending` в `open` |
-| `TicketStatusChanged` | запись в `ticket_status_logs`; письмо клиенту при `resolved` |
+| `AgentReplied` | уведомить клиента |
+| `CustomerReplied` | уведомить назначенного агента (если исполнителя нет, агентов очереди) |
+| `TicketStatusChanged` | письмо клиенту при `resolved` |
 
 Требования: события отправляются после фиксации транзакции; обработчики идемпотентны; у каждого заданы `tries` и `backoff`; уведомления идут по каналам `mail` и `database`.
 
@@ -153,22 +161,24 @@ users ─────────────└──< notifications           
 
 ```
 app/
-├── Actions/            CreateTicket, ReplyToTicket, ChangeTicketStatus, AssignTicket, StoreAttachments
+├── Actions/            CreateTicket, ReplyToTicket, ChangeTicketStatus, AssignTicket, ClaimTicket, StoreAttachments
 ├── Console/Commands/   CloseStaleTickets, RemindAgents
 ├── Enums/              TicketStatus, TicketPriority, UserRole
 ├── Events/             TicketCreated, TicketAssigned, AgentReplied, CustomerReplied, TicketStatusChanged
 ├── Http/
 │   ├── Controllers/    TicketController, TicketMessageController, AttachmentController,
-│   │                   TicketStatusController, TicketAssignController, AgentQueueController, Admin\*
+│   │                   TicketStatusController, TicketAssignController, TicketClaimController,
+│   │                   AgentQueueController, Admin\*
 │   ├── Middleware/     HandleInertiaRequests (общие props)
-│   └── Requests/       StoreTicketRequest, StoreMessageRequest, ...
+│   ├── Requests/       StoreTicketRequest, StoreMessageRequest, ...
+│   └── Resources/      TicketResource, TicketMessageResource, ...
 ├── Listeners/          по одному классу на реакцию из раздела 7
 ├── Models/             User, Ticket, TicketMessage, TicketAttachment, Tag, TicketStatusLog
 ├── Notifications/      по одному классу на письмо
 └── Policies/           TicketPolicy, TicketMessagePolicy, AttachmentPolicy
 ```
 
-Принципы: системные поля тикета (`status`, `assignee_id`, `customer_id`, `last_activity_at`, `first_responded_at`, `resolved_at`, `closed_at`) не входят в `$fillable` и задаются явным присваиванием в Actions с последующим `save()`; вызов `update([...])` с такими полями молча ничего не сделает. В `$fillable` остаются только поля, приходящие от пользователя. Контроллер тонкий (авторизация, валидация, вызов Action, ответ); бизнес-логика только в Actions; запросы списков фильтруются scope `visibleTo($user)`, а не только Policy.
+Принципы: системные поля тикета (`status`, `assignee_id`, `customer_id`, `last_activity_at`, `first_responded_at`, `resolved_at`, `closed_at`) не входят в `$fillable` и задаются явным присваиванием в Actions с последующим `save()`; вызов `update([...])` с такими полями молча ничего не сделает. В `$fillable` остаются только поля, приходящие от пользователя. Поля, значения которых база подставляет по умолчанию, Actions тоже задают явно: Eloquent не перечитывает их после вставки. Контроллер тонкий (авторизация, валидация, вызов Action, ответ); бизнес-логика только в Actions; запросы списков фильтруются scope `visibleTo($user)`, а не только Policy.
 
 ## 10. Нефункциональные требования
 
@@ -184,15 +194,16 @@ app/
 3. Недопустимые переходы статусов отклоняются.
 4. Количество SQL-запросов на странице списка не растёт с числом тикетов.
 5. Очередь и планировщик работают на тестовом сервере под Supervisor и cron.
+6. Коды отказа 404 и 403 соответствуют разделу 3 и проверены тестами, включая ответ админа в закрытый тикет.
 
 ## 12. Этапы
 
 1. Каркас на официальном стартовом наборе Laravel с React (Inertia), миграции, модели, фабрики.
-2. Серверная часть клиентских сценариев и Policy вместе с тестами прав.
+2. Серверная часть клиентских сценариев и Policy вместе с тестами прав (страницы Inertia пока минимальные заглушки).
 3. Интерфейс клиента: список, создание, страница тикета.
 4. Кабинет агента и админа (сервер + интерфейс).
 5. События, уведомления, очередь.
-6. Вложения.
+6. Вложения (скачивание, предпросмотр, лимиты).
 7. Планировщик и команды.
 8. Сквозные тесты Playwright, деплой, проверка критериев приёмки.
 
@@ -202,7 +213,7 @@ app/
 
 ### Архитектура
 
-Один Laravel-проект. Контроллеры возвращают `Inertia::render('Страница', $props)`, отдельного JSON API на этом этапе нет. Аутентификация сессионная, CSRF и валидация серверные, ошибки валидации приходят в форму через `useForm`. Публичный REST API (Sanctum) выносится в отдельный будущий этап.
+Один Laravel-проект. Контроллеры возвращают `Inertia::render('страница', $props)`, отдельного JSON API на этом этапе нет. Аутентификация сессионная, CSRF и валидация серверные, ошибки валидации приходят в форму через `useForm`. Публичный REST API (Sanctum) выносится в отдельный будущий этап.
 
 ### Стек
 
@@ -210,21 +221,25 @@ React + TypeScript, Inertia, Tailwind, shadcn/ui (компоненты копи�
 
 ### Структура
 
+Имена каталогов и файлов следуют стартовому набору (нижний регистр, kebab-case), имена Inertia-компонентов тоже (`tickets/show`).
+
 ```
 resources/js/
-├── Pages/
-│   ├── Auth/               Login, Register, ForgotPassword
-│   ├── Tickets/            Index, Create, Show
-│   ├── Agent/              Queue
-│   └── Admin/              Users, Tags
-├── Components/
-│   ├── ui/                 shadcn-компоненты (Button, Input, Badge, Dialog, ...)
-│   ├── tickets/            TicketTable, TicketFilters, MessageThread, MessageForm,
-│   │                       StatusBadge, PriorityBadge, AttachmentList, AssigneeSelect
-│   └── layout/             AppLayout, Sidebar, Flash
+├── pages/
+│   ├── auth/               из стартового набора
+│   ├── tickets/            index.tsx, create.tsx, show.tsx
+│   ├── agent/              queue.tsx
+│   └── admin/              users.tsx, tags.tsx
+├── components/
+│   ├── ui/                 shadcn-компоненты из набора
+│   └── tickets/            ticket-table, ticket-filters, message-thread, message-form,
+│                           status-badge, priority-badge, attachment-list, assignee-select
+├── layouts/                из стартового набора
 ├── types/                  Ticket, TicketMessage, User, Tag, Paginated<T>, PageProps
 └── lib/                    форматирование дат, утилиты
 ```
+
+Каталоги `routes`, `actions`, `wayfinder` генерирует Wayfinder: их не редактируют и не коммитят.
 
 ### Экраны
 
@@ -240,11 +255,12 @@ resources/js/
 ### Данные между сервером и интерфейсом
 
 - Общие props на каждой странице: текущий пользователь (`id`, `name`, `role`), flash-сообщения, число непрочитанных уведомлений.
-- Права передаются явно в props страницы: `can: { reply, addInternalNote, changeStatus, assign }`. Берутся из Policy на сервере.
+- Права передаются явно в props страницы: `can: { reply, addInternalNote, changeStatus, assign, claim }`. Берутся из Policy на сервере.
 - Скрытие кнопок по `can` только удобство. Любое действие всё равно проходит Policy на сервере.
-- Вложенные данные отдаются в виде API Resources или явных массивов с белым списком полей. Модели целиком в props не передавать (утечка полей, `password`, внутренние поля).
+- Вложенные данные отдаются в виде API Resources с белым списком полей. Модели целиком в props не передавать (утечка полей, `password`, внутренние поля). Поле `path` вложений в props не попадает никогда.
 - Внутренние заметки (`is_internal`) не должны попадать в props клиента вообще, а не прятаться на фронте.
 - Связи грузятся заранее (`with()`), N+1 в контроллерах Inertia недопустим.
+- Обёртка `data` у ресурсов отключена глобально: `JsonResource::withoutWrapping()`. Пагинированные коллекции сохраняют свой ключ `data`.
 
 ### Требования к интерфейсу
 
@@ -258,41 +274,39 @@ resources/js/
 
 | Уровень | Инструмент | Что проверяется |
 |---|---|---|
-| Серверный | Pest/PHPUnit + `assertInertia` | компонент страницы, состав props, отсутствие чужих данных и внутренних заметок |
-| Компоненты | Vitest + Testing Library | `StatusBadge`, `MessageThread`, форма ответа, скрытие кнопок по `can` |
+| Серверный | PHPUnit + `assertInertia` | компонент страницы, состав props, отсутствие чужих данных и внутренних заметок |
+| Компоненты | Vitest + Testing Library | `status-badge`, `message-thread`, форма ответа, скрытие кнопок по `can` |
 | Сквозной | Playwright | 3 сценария: клиент создаёт тикет; агент отвечает и меняет статус; клиент не может открыть чужой тикет |
 
 ### Обязательный тест утечки внутренних заметок
 
-Внутренние заметки отфильтровываются в запросе (`TicketMessage::scopeForViewer`), а не на фронте. Это проверяется так:
+Внутренние заметки отфильтровываются в запросе (`TicketMessage::scopeForViewer`), а не на фронте. Данные в тестах создаются через фабрики: они обходят `$fillable`, а `$ticket->messages()->create([...])` молча проигнорировал бы `user_id` и `is_internal`.
 
 ```php
+use App\Models\Ticket;
+use App\Models\TicketMessage;
+use App\Models\User;
 use Inertia\Testing\AssertableInertia as Assert;
 
 public function test_customer_does_not_receive_internal_notes(): void
 {
     $customer = User::factory()->create();
+    $agent    = User::factory()->agent()->create();
     $ticket   = Ticket::factory()->for($customer, 'customer')->create();
-    $ticket->messages()->create(['user_id' => $customer->id, 'body' => 'Публичное']);
-    $ticket->messages()->create([
-        'user_id' => User::factory()->agent()->create()->id,
-        'body' => 'СЕКРЕТ', 'is_internal' => true,
-    ]);
+
+    TicketMessage::factory()->for($ticket)->for($customer, 'user')->create(['body' => 'Публичное']);
+    TicketMessage::factory()->for($ticket)->for($agent, 'user')->internal()->create(['body' => 'СЕКРЕТ']);
 
     $this->actingAs($customer)
         ->get(route('tickets.show', $ticket))
         ->assertOk()
         ->assertInertia(fn (Assert $page) => $page
-            ->component('Tickets/Show')
+            ->component('tickets/show')
             ->has('messages', 1)
             ->where('can.addInternalNote', false)
         );
 }
 ```
-
-### Передача данных в props
-
-Модели целиком в props не передаются. Используются API Resources с белым списком полей и `whenLoaded` для связей. Решение об обёртке `data` у коллекций принимается один раз на весь проект.
 
 ### Следующие шаги (вне MVP)
 
@@ -303,4 +317,4 @@ public function test_customer_does_not_receive_internal_notes(): void
 1. Все экраны из таблицы работают на трёх ширинах экрана.
 2. Ни один ответ Inertia не содержит внутренних заметок и чужих данных для клиента (подтверждено `assertInertia`-тестами).
 3. Сквозные сценарии Playwright проходят.
-4. Сборка `npm run build` выполняется без ошибок TypeScript.
+4. Сборка `npm run build` и `npm run types:check` выполняются без ошибок.
